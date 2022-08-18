@@ -21,7 +21,7 @@ class Logger(object):
         tmp = str(epoch)+'\t'+str(lr)+'\t'
         print('Epoch',':',epoch,'-',lr)
         writer = self.eventwriter
-        writer.add_scalar('lr',math.log(lr),epoch)
+        writer.add_scalar('lr',lr,epoch)
         for k in losses:
             if losses[k]>0:            
                 writer.add_scalar('Train/'+k,losses[k],epoch)            
@@ -32,7 +32,7 @@ class Logger(object):
         writer.flush()
     def write_runningloss(self,step,losses,lr):
         writer = self.eventwriter
-        writer.add_scalar('running lr',math.log(lr),step) 
+        writer.add_scalar('running lr',lr,step) 
         for k in losses:
             writer.add_scalar('Running/'+k,losses[k],step)  
         writer.flush()

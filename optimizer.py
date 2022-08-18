@@ -11,6 +11,15 @@ import random
 from model import RenderLoss,RenderMetric
 from utils import Logger, vis_batch
 import cv2
+def get_result(net,data,dev='cuda'):
+    wi,wo,light_rgb,imgs,props = data
+    normal,albedo,roughness,fresnel = props.squeeze().float().to(dev).split([3,3,3,3],dim=-1)
+    img,props = net.rendering(wi[0].to(dev).float(),wo[0].to(dev).float(),light_rgb[0].to(dev).float())
+    #props[...,:3] = normal
+    #props[...,3:6] = albedo
+    #props[...,6:9] = roughness
+    return img,props
+
 class Trainer:
     def __init__(self,cfg,datasets,net,epoch):
         self.cfg = cfg
@@ -25,7 +34,7 @@ class Trainer:
             self.trainval = False
         if 'test' in datasets:
             self.testset = datasets['test']
-        self.net = net
+        self.net = net.float()
         self.loss = RenderLoss(cfg.loss_type,cfg.diff)
         self.eval_metric = RenderMetric()
 
@@ -34,11 +43,15 @@ class Trainer:
         self.checkpoints = cfg.log_exp_path
 
         self.device = cfg.device
-
-        self.optimizer = optim.Adam(self.net.parameters(),lr=cfg.lr,weight_decay=cfg.weight_decay)
-        #self.lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer,mode='min', factor=cfg.lr_factor, threshold=1e-2,patience=cfg.patience,min_lr=cfg.min_lr)
-        #self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer, 7500*2//cfg.bs, T_mult=1, eta_min=5e-6, last_epoch=- 1, verbose=False)
-        self.lr_scheduler = optim.lr_scheduler.MultiStepLR(self.optimizer,cfg.schedules,gamma=cfg.lr_factor)
+        
+        print(self.net.normal.is_leaf,self.net.albedo.is_leaf,self.net.fresnel.is_leaf,self.net.roughness.is_leaf)
+        self.optimizer = optim.Adam([self.net.normal,self.net.albedo,self.net.fresnel,self.net.roughness],lr=cfg.lr,weight_decay=cfg.weight_decay)
+        for data in tqdm(self.trainset):
+            _,_,_,data =data 
+            normal,albedo,roughness,fresnel = data.squeeze().split([3,3,3,3],dim=-1)
+            self.net.initialization(normal,albedo,roughness[...,0],fresnel)
+        self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer, epoch[1]*2, T_mult=1, eta_min=0, last_epoch=- 1, verbose=False)
+        #self.lr_scheduler = optim.lr_scheduler.MultiStepLR(self.optimizer,cfg.schedules,cfg.lr_factor)
         if not(os.path.exists(self.checkpoints)):
             os.mkdir(self.checkpoints)
         self.predictions = os.path.join(self.checkpoints,'pred')
@@ -66,6 +79,7 @@ class Trainer:
         self.early_stop_epochs = 50
         self.alpha = 0.95 #for update moving loss
         self.lr_change= False
+        self.stopepoch = 0
 
 
         self.save_pred = False
@@ -95,7 +109,7 @@ class Trainer:
         else:
             self.load_epoch(str(idx))
     def save_epoch(self,idx,epoch):
-        saveDict = {'net':self.net.state_dict(),
+        saveDict = {'net':[self.net.normal,self.net.albedo,self.net.fresnel,self.net.roughness],
                     'optimizer': self.optimizer.state_dict(),
                     'lr_scheduler':self.lr_scheduler.state_dict(),
                     'epoch':epoch,
@@ -104,43 +118,41 @@ class Trainer:
                     'movingLoss':self.movingLoss,
                     'bestmovingLoss':self.bestMovingLoss,
                     'bestmovingLossEpoch':self.bestMovingLossEpoch,'steps':self.steps}
-        path = os.path.join(self.checkpoints,f'{idx}.pt')
+        path = os.path.join(self.checkpoints,'epoch_'+idx+'.pt')
         torch.save(saveDict,path)                  
     def load_epoch(self,idx):
         model_path = os.path.join(self.checkpoints,f'epoch_{idx}.pt')
         if os.path.exists(model_path):
             print('load:'+model_path)
-            
+            info = torch.load(model_path)
+            self.net.normal,self.net.albedo,self.net.fresnel,self.net.roughness = info['net']
+            if not(self.lr_change):
+                self.optimizer.load_state_dict(info['optimizer'])#might have bugs about device
+                for state in self.optimizer.state.values():
+                    for k, v in state.items():
+                        if isinstance(v, torch.Tensor):
+                            state[k] = v.to(self.device)
+                self.lr_scheduler.load_state_dict(info['lr_scheduler'])
+            self.start = info['epoch']+1
+            self.best_metric = info['best_metric']
+            self.best_metric_epoch = info['best_metric_epoch']
+            self.movingLoss = info['movingLoss']
+            self.bestMovingLoss = info['bestmovingLoss']
+            self.bestMovingLossEpoch = info['bestmovingLossEpoch']
+            self.steps = info['steps']
         else:
-            print(f'no such model at:{model_path}')
-            model_path = os.path.join(self.checkpoints,f'{idx}.pt')
-            if os.path.exists(model_path):
-                print('load:'+model_path)
-            else:
-                print(f'And no such model at:{model_path}')
-                exit()
-        info = torch.load(model_path)
-        self.net.load_state_dict(info['net'])
-        if not(self.lr_change):
-            self.optimizer.load_state_dict(info['optimizer'])#might have bugs about device
-            for state in self.optimizer.state.values():
-                for k, v in state.items():
-                    if isinstance(v, torch.Tensor):
-                        state[k] = v.to(self.device)
-            self.lr_scheduler.load_state_dict(info['lr_scheduler'])
-        self.start = info['epoch']+1
-        self.best_metric = info['best_metric']
-        self.best_metric_epoch = info['best_metric_epoch']
-        self.movingLoss = info['movingLoss']
-        self.bestMovingLoss = info['bestmovingLoss']
-        self.bestMovingLossEpoch = info['bestmovingLossEpoch']
-        self.steps = info['steps']
+            print('no such model at:',model_path)
+            exit()
     def _updateRunningLoss(self,loss,epoch):
         if self.bestMovingLoss>loss:
+            print(f'loss decrease: {self.bestMovingLoss-loss}')
             self.bestMovingLoss = loss
             self.bestMovingLossEpoch = epoch
             self.save_epoch('bestm',epoch)
-            print(f'loss decrease: {self.bestMovingLoss}')
+            self.stopeoch = 0
+        else:
+            self.stopeoch +=1
+            
     def logMemoryUsage(self, additionalString=""):
         if torch.cuda.is_available():
             print(additionalString + "Memory {:.0f}Mb max, {:.0f}Mb current".format(
@@ -172,36 +184,34 @@ class Trainer:
                 'render':0.0,
                 'render_mse':0.0}
         running = 0.0
-        self.net.train().float()
+        self.net.train()
         n = len(self.trainset)
         torch.cuda.empty_cache()
         times ={'total':0.0,'data':0.0}
         start = time.time()
         for data in tqdm(self.trainset):
             times['data'] += (time.time()-start)/n
-            wi,wo,light_rgb,imgs,props_gt = data
-            preds,props = self.net(wi.to(self.device),wo.to(self.device),light_rgb.to(self.device),imgs.to(self.device),props_gt.to(self.device))
-            loss,losses = self.loss(preds,imgs.to(self.device),props,props_gt.to(self.device))            
-            for k in losses.keys():
-                if np.isnan(losses[k]):
+            
+            wi,wo,imgs,_ = data
+            preds,_= get_result(self.net,data)
+            loss,losses = self.loss(preds.unsqueeze(dim=0),imgs.to(self.device).float())            
+            for k in running_loss:
+                if k in losses.keys():
+                    if np.isnan(losses[k]):
                         continue
-                if k in running_loss:
                     running_loss[k] += losses[k]/n
-                else:
-                    running_loss[k] = losses[k]/n
-            if torch.isnan(loss):
-                print('nan loss')
-                del imgs,preds,losses
-                continue
             loss.backward()
-            running = loss.item()
+            if self.steps ==0:
+                running = loss.item()
+            else:
+                running = running*0.5 + loss.item()*0.5
             self.steps+=1
             
             losses['watch'] = running
             self.logger.write_runningloss(self.steps,losses,self.optimizer.param_groups[0]['lr'])
             self.optimizer.step()
             self.optimizer.zero_grad()
-            self.lr_scheduler.step()
+            
             del imgs,preds,losses
             #solve gradient explosion problem caused by large learning rate or small batch size
             #nn.utils.clip_grad_value_(self.net.parameters(), clip_value=2.0)             
@@ -210,7 +220,7 @@ class Trainer:
             del loss
             times['total'] += (time.time()-start)/n
             start = time.time()
-        print(f'run time:{times["total"]},data time:{times["data"]}')
+        print(f'run time:{times["total"]},data time:{times["data"]},running:{running}')
         self.logMemoryUsage()
         return running_loss
     def train(self):
@@ -221,20 +231,17 @@ class Trainer:
         print(self.optimizer.param_groups[0]['lr'])
         epoch = self.start
         stop_epochs = 0
-        while epoch < self.total and stop_epochs<self.early_stop_epochs:
-            running_loss = self.train_one_epoch()          
+        #
+        while epoch < self.total and self.stopepoch <self.early_stop_epochs:
+            running_loss = self.train_one_epoch()     
+            self.lr_scheduler.step()       
             lr = self.optimizer.param_groups[0]['lr']
             self.logger.write_loss(epoch,running_loss,lr)
             #step lr
             self._updateRunningLoss(running_loss['total'],epoch)
-            lr_ = self.optimizer.param_groups[0]['lr']
-            if lr_ == self.cfg.min_lr:
-                stop_epochs +=1
             if (epoch+1)%self.save_every_k_epoch==0:
-                self.save_epoch(f'epoch_{epoch+1}',epoch)
+                self.save_epoch(str(epoch),epoch)
             if (epoch+1)%self.val_every_k_epoch==0:
-                
-                
                 if self.trainval:
                     #eval train subset
                     metrics = self.validate(epoch,'train',self.save_pred)
@@ -255,7 +262,7 @@ class Trainer:
             epoch +=1
                 
         print("Best: {:.4f} at epoch {}".format(self.best_metric, self.best_metric_epoch))
-        self.save_epoch(f'epoch_{epoch}',epoch)
+        self.save_epoch(str(epoch-1),epoch-1)
     def validate(self,epoch,mode,save=False):
         print('start Validation Epoch:',epoch,mode)
         valset = self.valset if mode=='val' else self.trainval
@@ -263,26 +270,20 @@ class Trainer:
         n = len(valset)
         idx = 0
         for data in tqdm(valset):
-            with torch.no_grad():
-                wi,wo,light_rgb,imgs,prop_gt = data
-                preds,props = self.net(wi.to(self.device),wo.to(self.device),light_rgb.to(self.device),imgs.to(self.device),prop_gt.to(self.device))
-                result = self.eval_metric(preds,imgs.to(self.device),props,prop_gt.to(self.device))           
-                #solve gradient explosion problem caused by large learning rate or small batch size
-                #nn.utils.clip_grad_value_(self.net.parameters(), clip_value=2.0)             
-                #nn.utils.clip_grad_norm_(self.net.parameters(),max_norm=2.0)
-                for k in result:
-                    if k in metrics.keys():
-                        metrics[k].append(result[k])
-                    else:
-                        metrics[k]=[result[k]]
-                img = vis_batch(torch.cat([preds,props],dim=-1),torch.cat([imgs,prop_gt],dim=-1))
-                save_path = os.path.join(self.predictions,mode)
-                if not os.path.exists(save_path):
-                    os.mkdir(save_path)
-                
-                idx+=1
-            if idx==2:
-                cv2.imwrite(os.path.join(save_path,f'vis_{idx}_{epoch}.png'),cv2.cvtColor(img,cv2.COLOR_RGB2BGR))
+            wi,wo,imgs,prop_gt = data
+            preds,props = get_result(self.net,data)
+            result = self.eval_metric(preds,imgs.to(self.device).squeeze(),props,prop_gt.to(self.device).squeeze())           
+            #solve gradient explosion problem caused by large learning rate or small batch size
+            #nn.utils.clip_grad_value_(self.net.parameters(), clip_value=2.0)             
+            #nn.utils.clip_grad_norm_(self.net.parameters(),max_norm=2.0)
+            for k in result:
+                if k in metrics.keys():
+                    metrics[k].append(result[k])
+                else:
+                    metrics[k]=[result[k]]
+            img = vis_batch(torch.cat([preds,props],dim=-1),torch.cat([imgs,prop_gt],dim=-1)).astype(np.uint8)
+            cv2.imwrite(os.path.join(self.predictions,f'vis_{idx}_{epoch}_{mode}.png'),cv2.cvtColor(img,cv2.COLOR_RGB2BGR))
+            idx+=1
         self.logMemoryUsage()
         for k in metrics:
             metrics[k] = np.mean(metrics[k])
