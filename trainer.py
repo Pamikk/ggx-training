@@ -172,16 +172,16 @@ class Trainer:
                 'render':0.0,
                 'render_mse':0.0}
         running = 0.0
-        self.net.train().float()
+        self.net.train()
         n = len(self.trainset)
         torch.cuda.empty_cache()
         times ={'total':0.0,'data':0.0}
         start = time.time()
         for data in tqdm(self.trainset):
             times['data'] += (time.time()-start)/n
-            wi,wo,light_rgb,imgs,props_gt = data
+            wi,wo,light_rgb,imgs,props_gt,imgt = data
             preds,props = self.net(wi.to(self.device),wo.to(self.device),light_rgb.to(self.device),imgs.to(self.device),props_gt.to(self.device))
-            loss,losses = self.loss(preds,imgs.to(self.device),props,props_gt.to(self.device))            
+            loss,losses = self.loss(preds,imgt.to(self.device),props,props_gt.to(self.device))            
             for k in losses.keys():
                 if np.isnan(losses[k]):
                         continue
@@ -262,14 +262,12 @@ class Trainer:
         metrics = {}
         n = len(valset)
         idx = 0
+        self.net.eval()
         for data in tqdm(valset):
             with torch.no_grad():
-                wi,wo,light_rgb,imgs,prop_gt = data
-                preds,props = self.net(wi.to(self.device),wo.to(self.device),light_rgb.to(self.device),imgs.to(self.device),prop_gt.to(self.device))
-                result = self.eval_metric(preds,imgs.to(self.device),props,prop_gt.to(self.device))           
-                #solve gradient explosion problem caused by large learning rate or small batch size
-                #nn.utils.clip_grad_value_(self.net.parameters(), clip_value=2.0)             
-                #nn.utils.clip_grad_norm_(self.net.parameters(),max_norm=2.0)
+                wi,wo,light_rgb,imgs,prop_gt,imgt = data
+                props = self.net(wi.to(self.device),wo.to(self.device),light_rgb.to(self.device),imgs.to(self.device),prop_gt.to(self.device))
+                result = self.eval_metric(preds,imgt.to(self.device),props,prop_gt.to(self.device))           
                 for k in result:
                     if k in metrics.keys():
                         metrics[k].append(result[k])
@@ -283,6 +281,7 @@ class Trainer:
                 idx+=1
             if idx==2:
                 cv2.imwrite(os.path.join(save_path,f'vis_{idx}_{epoch}.png'),cv2.cvtColor(img,cv2.COLOR_RGB2BGR))
+        cv2.imwrite(os.path.join(save_path,f'vis_{idx-1}_{epoch}.png'),cv2.cvtColor(img,cv2.COLOR_RGB2BGR))
         self.logMemoryUsage()
         for k in metrics:
             metrics[k] = np.mean(metrics[k])

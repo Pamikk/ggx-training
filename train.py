@@ -14,7 +14,7 @@ class Config:
         exp_path = "/home/pami/exps/ggx_scratch"
         if not os.path.exists(exp_path):
             os.mkdir(exp_path)
-        self.exp_name = "feat_rand_sup_spec_huber"
+        self.exp_name = "feat_sup_all_l1"
         self.log_exp_path = os.path.join(exp_path,self.exp_name)
         if not os.path.exists(self.log_exp_path):
             os.mkdir(self.log_exp_path)
@@ -25,16 +25,16 @@ class Config:
         # train
         self.deterministic = True
         self.resume = 0
-        self.epochs = 30
+        self.epochs = 40
         self.ovf = False
-        self.bs = 8
+        self.bs = 1
 
         self.val_every_k_epoch = max(self.epochs//20,1)
         self.save_every_k_epoch = max(self.epochs//5,1)
-        self.lr = 2e-4
+        self.lr = 2e-5
         self.weight_decay = 1e-5
         self.lr_factor = 0.2
-        self.schedules = np.array([20000,40000])//self.bs
+        self.schedules = []#np.array([200,400])//self.bs
         self.patience = max(100//self.bs,10)
         print(self.patience)
         self.min_lr = 1e-7
@@ -63,7 +63,7 @@ def main():
     
     TrainvalLoader = DataLoader(Material(path=cfg.data_path,mode='trainval',multilight=cfg.multilight,overfitting=cfg.ovf),batch_size=1,shuffle=False)
     if cfg.ovf:
-        TestLoader = DataLoader(Material(path=cfg.data_path,mode='test',multilight=cfg.multilight,overfitting=cfg.ovf),batch_size=1,shuffle=False)
+        TestLoader =TrainvalLoader
         datasets ={'train':TrainLoader,'test':TestLoader,'trainval':TrainvalLoader}
     else:
         ValLoader= TestLoader = DataLoader(Material(path=cfg.data_path,mode='test',multilight=cfg.multilight),batch_size=1,shuffle=False)

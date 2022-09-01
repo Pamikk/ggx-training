@@ -75,7 +75,7 @@ class Decoder(nn.Module):
         self.upsample = not(out_channel == channels)
         if self.upsample:
             self.conv = conv1x1(channels,out_channel,bias=True)
-            self.up = nn.Upsample(scale_factor=2,mode='bilinear',align_corners=False)
+            self.up = nn.Upsample(scale_factor=2,mode='bilinear',align_corners=True)
         seq=[nn.Sequential(BasicBlock(channels,channels),BasicBlock(channels,channels)) for _ in range(depth)]
         self.seq = nn.Sequential(*seq)
     def forward(self,x):
@@ -133,10 +133,10 @@ class Network(nn.Module):
         else:
             layers+=[conv3x3(in_channel,out_channel,bias=True), nn.Sigmoid()]
         return nn.Sequential(*layers)
-    def forward(self,wi,wo,light_rgb,x,data_gt=None):
+    def forward(self,x,data_gt=None):
         feats = []
         x = x.permute([0,3,1,2])
-        #x = x/2.0 -1.0
+        x = x/2.0 -1.0
         x = self.in_conv(x)
         for i,encoder in enumerate(self.encoders):
             if i!=0:
@@ -169,15 +169,111 @@ class Network(nn.Module):
         for i,usegt in enumerate(self.usegt):
             if usegt:
                 data[...,3*i:3*(i+1)] = data_gt[...,3*i:3*(i+1)] 
-        #print(data.shape)
-        imgs = torch.zeros((bs,h,w,3),dtype=x.dtype,device=x.device)
-        for i in range(bs):
-            for j in range(h):
-                if len(wi.shape) == len(data.shape):
-                    imgs[i,j,...] = get_rendering(wi[i,j,...],wo[i,j,...],data[i,j,...],GGXRenderer(multilight=self.multilight),light_rgb[i,j,...])
-                else:
-                    imgs[i,j,...] = get_rendering(wi[i,...],wo[i,...],data[i,j,...],GGXRenderer(multilight=self.multilight),light_rgb[i,...])
-        return imgs,data
+        
+        return data
+from inplace_abn import InPlaceABN
+
+class ConvBnReLU(nn.Module):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 kernel_size=3,
+                 stride=1,
+                 pad=1,
+                 norm_act=InPlaceABN,):
+        super(ConvBnReLU, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, padding=pad, bias=False,)
+        self.bn = norm_act(out_channels)
+
+    def forward(self, x):
+        return self.bn(self.conv(x))
+
+
+
+###################################  feature net  ######################################
+class Network_nerf(nn.Module):
+    """
+    output 3 levels of features using a FPN structure
+    """
+
+    def __init__(self,cfg, norm_act=InPlaceABN):
+        super(Network_nerf, self).__init__()
+
+        self.conv0 = nn.Sequential(
+            ConvBnReLU(3, 8, 3, 1, 1, norm_act=norm_act),
+            ConvBnReLU(8, 8, 3, 1, 1, norm_act=norm_act),
+        )
+
+        self.conv1 = nn.Sequential(
+            ConvBnReLU(8, 16, 5, 2, 2, norm_act=norm_act),
+            ConvBnReLU(16, 16, 3, 1, 1, norm_act=norm_act),
+            ConvBnReLU(16, 16, 3, 1, 1, norm_act=norm_act),
+        )
+
+        self.conv2 = nn.Sequential(
+            ConvBnReLU(16, 32, 5, 2, 2, norm_act=norm_act),
+            ConvBnReLU(32, 32, 3, 1, 1, norm_act=norm_act),
+            ConvBnReLU(32, 32, 3, 1, 1, norm_act=norm_act),
+        )
+
+        self.toplayer = nn.Conv2d(32, 32, 1)
+        self.up = nn.Upsample(scale_factor=4,mode='bilinear',align_corners=True)
+        self.in_channel = 32
+        if cfg.share:
+                    self.pred_normal = self.make_pred_layers(self.in_channel,3,'tanh')
+                    self.pred_svbrdf = self.make_pred_layers(self.in_channel,7,'sigmoid')
+        else:
+            self.normal_pred = self.make_pred_layers(self.in_channel,3,'tanh')
+            self.albedo_pred = self.make_pred_layers(self.in_channel,3,'sigmoid')
+            self.roughness_pred = self.make_pred_layers(self.in_channel,1,'sigmoid')
+            self.fresnel_pred = self.make_pred_layers(self.in_channel,3,'sigmoid')
+        self.share = cfg.share
+        self.multilight = cfg.multilight
+        self.usegt = cfg.usegt
+    def make_pred_layers(self,in_channel,out_channel,activ):
+        layers = [nn.Linear(in_channel, in_channel),
+                nn.SELU(True),
+                nn.Linear(in_channel, out_channel)]
+        if activ == 'tanh':
+            layers+=[nn.Tanh()]
+        else:
+            layers+=[nn.Sigmoid()]
+        return nn.Sequential(*layers)
+    def forward(self,x,data_gt=None):
+        #feats = []
+        x = x.permute([0,3,1,2])
+        x = x/2.0 -1.0
+        # x: (B, 3, H, W)
+        bs,_,h,w = x.shape
+        x = self.conv0(x)  # (B, 8, H, W)
+        x = self.conv1(x)  # (B, 16, H//2, W//2)
+        x = self.conv2(x)  # (B, 32, H//4, W//4)
+        x = self.toplayer(x)  # (B, 32, H//4, W//4)
+        x = self.up(x).permute(0,2, 3,1).contiguous()
+        if self.share:
+            normal = self.pred_normal(x)
+            svbrdf = self.pred_svbrdf(x)
+            normal = F.normalize(normal,dim=-1)
+            data = torch.cat([normal,#torch.cat((data[:,:2,...],torch.ones((bs,1,h,w),dtype=feats.dtype,device=feats.device)),dim=1),dim=1).contiguous(),
+                             svbrdf[...,:3].clamp(0.001,1.0),svbrdf[...,3].clamp(0.001,1.0).unsqueeze(-1).repeat(1,1,1,3).contiguous(),svbrdf[...,4:].clamp(0.0,1.0)],dim=-1)        
+        else:
+            normal =  F.normalize(self.normal_pred(x),dim=-1)
+            albedo = self.albedo_pred(x)
+            roughness = self.roughness_pred(x).clamp(0.001,1.0).repeat(1,1,1,3).contiguous()
+            fresnel =self.fresnel_pred(x)
+            data = torch.cat((normal,albedo,roughness,fresnel),dim=-1)
+        #data = torch.permute(data,[0,2,3,1]).contiguous()
+        if torch.isnan(data).any():
+            print('nan in data')
+            exit()
+        for i,usegt in enumerate(self.usegt):
+            if usegt:
+                data[...,3*i:3*(i+1)] = data_gt[...,3*i:3*(i+1)] 
+        return data
+    def _upsample_add(self, x, y):
+        return F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=True) + y
+
+    
 MSE_Loss = torch.nn.MSELoss()
 L1_Loss = torch.nn.L1Loss()
 def log_mse(x,y):
@@ -187,7 +283,7 @@ class RenderLoss(nn.Module):
         super(RenderLoss,self).__init__()
         self.loss_type = type
         self.diff = diff
-        self.sup_props = (True,True,True,True)
+        self.sup_props = (True,True,True,True)#(False,False,False,False)#
     def forward(self,img,gt_img,prop=None,gt_prop=None):
         assert img.shape == gt_img.shape
         if self.loss_type == 'l1':
@@ -212,8 +308,8 @@ class RenderLoss(nn.Module):
         for i,flag in enumerate(self.sup_props):
             if flag:
                 if i==0:
-                    loss = F.huber_loss(prop[...,:3],gt_prop[...,:3])
-                elif i==1:
+                    loss = F.smooth_l1_loss(prop[...,:3],gt_prop[...,:3])
+                elif i==2:
                     loss = log_mse(prop[...,6],gt_prop[...,6])
                 else:
                     loss = log_mse(prop[...,3*i:3*i+3],gt_prop[...,3*i:3*i+3])
