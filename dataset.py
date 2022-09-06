@@ -159,22 +159,16 @@ class Material(Dataset):
         if self.mode!='train':
             wi,wo = self.rays
             img = gen_img(wi,wo,data.view(-1,12),GGXRenderer(self.multilight),self.light_intesity)
-            return wi.reshape(h,self.width,3),wo.reshape(h,self.width,3),self.light_intesity,img.reshape(h,self.width,3),data,img.reshape(h,self.width,3)
+            return wi.reshape(h,self.width,3),wo.reshape(h,self.width,3),self.light_intesity,img.reshape(h,self.width,3),data
         else:
             #(wi,wo),img = gen_DiffuseRendering(data.view(-1,12),GGXRenderer(self.multilight))
             #return wi,wo,img.reshape(h,self.width,3),data
             if np.random.rand()>0.5:
-                (wi,wo),imgi,light_rgb = gen_DiffuseRendering(data.view(-1,12),GGXRenderer(self.multilight))
+                (wi,wo),img,light_rgb = gen_DiffuseRendering(data.view(-1,12),GGXRenderer(self.multilight))
+                return wi,wo,light_rgb,img.reshape(h,self.width,3),data
             else:
-                (wi,wo),imgi,light_rgb = gen_SpecularRendering(data.view(-1,12),GGXRenderer(self.multilight))
-                wi,wo=wi.reshape(h,self.width,3),wo.reshape(h,self.width,3)
-            if np.random.rand()>0.5:
-                return wi,wo,self.light_intesity,imgi.reshape(h,self.width,3),data,imgi.reshape(h,self.width,3)
-            if np.random.rand()>0.5:
-                (wi,wo),imgt,light_rgb = gen_DiffuseRendering(data.view(-1,12),GGXRenderer(self.multilight))
-                return wi,wo,light_rgb,imgi.reshape(h,self.width,3),data,imgt.reshape(h,self.width,3)
-            else:
-                (wi,wo),imgt,light_rgb  = gen_SpecularRendering(data.view(-1,12),GGXRenderer(self.multilight))
-                return wi.reshape(h,self.width,3),wo.reshape(h,self.width,3),light_rgb,imgi.reshape(h,self.width,3),data,imgt.reshape(h,self.width,3)
+                (wi,wo),img,light_rgb = gen_SpecularRendering(data.view(-1,12),GGXRenderer(self.multilight))
+                return wi.reshape(h,self.width,3),wo.reshape(h,self.width,3),light_rgb,img.reshape(h,self.width,3),data
+                
 
 

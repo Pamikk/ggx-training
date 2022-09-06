@@ -133,7 +133,7 @@ class Network(nn.Module):
         else:
             layers+=[conv3x3(in_channel,out_channel,bias=True), nn.Sigmoid()]
         return nn.Sequential(*layers)
-    def forward(self,x,data_gt=None):
+    def forward(self,wi,wo,light_rgb,x,data_gt=None):
         feats = []
         x = x.permute([0,3,1,2])
         x = x/2.0 -1.0
@@ -170,7 +170,15 @@ class Network(nn.Module):
             if usegt:
                 data[...,3*i:3*(i+1)] = data_gt[...,3*i:3*(i+1)] 
         
-        return data
+        #print(data.shape)
+        imgs = torch.zeros((bs,h,w,3),dtype=x.dtype,device=x.device)
+        for i in range(bs):
+            for j in range(h):
+                if len(wi.shape) == len(data.shape):
+                    imgs[i,j,...] = get_rendering(wi[i,j,...],wo[i,j,...],data[i,j,...],GGXRenderer(multilight=self.multilight),light_rgb[i,...])
+                else:
+                    imgs[i,j,...] = get_rendering(wi[i,...],wo[i,...],data[i,j,...],GGXRenderer(multilight=self.multilight),light_rgb[i,...])
+        return imgs,data
 from inplace_abn import InPlaceABN
 
 class ConvBnReLU(nn.Module):
@@ -239,7 +247,7 @@ class Network_nerf(nn.Module):
         else:
             layers+=[nn.Sigmoid()]
         return nn.Sequential(*layers)
-    def forward(self,x,data_gt=None):
+    def forward(self,wi,wo,light_rgb,x,data_gt=None):
         #feats = []
         x = x.permute([0,3,1,2])
         x = x/2.0 -1.0
@@ -269,7 +277,15 @@ class Network_nerf(nn.Module):
         for i,usegt in enumerate(self.usegt):
             if usegt:
                 data[...,3*i:3*(i+1)] = data_gt[...,3*i:3*(i+1)] 
-        return data
+        #print(data.shape)
+        imgs = torch.zeros((bs,h,w,3),dtype=x.dtype,device=x.device)
+        for i in range(bs):
+            for j in range(h):
+                if len(wi.shape) == len(data.shape):
+                    imgs[i,j,...] = get_rendering(wi[i,j,...],wo[i,j,...],data[i,j,...],GGXRenderer(multilight=self.multilight),light_rgb[i,...])
+                else:
+                    imgs[i,j,...] = get_rendering(wi[i,...],wo[i,...],data[i,j,...],GGXRenderer(multilight=self.multilight),light_rgb[i,...])
+        return imgs,data
     def _upsample_add(self, x, y):
         return F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=True) + y
 
@@ -283,7 +299,8 @@ class RenderLoss(nn.Module):
         super(RenderLoss,self).__init__()
         self.loss_type = type
         self.diff = diff
-        self.sup_props = (True,True,True,True)#(False,False,False,False)#
+        self.sup_props = (False,False,False,False)#(True,True,True,True)#
+        self.relight = True
     def forward(self,img,gt_img,prop=None,gt_prop=None):
         assert img.shape == gt_img.shape
         if self.loss_type == 'l1':
@@ -315,6 +332,19 @@ class RenderLoss(nn.Module):
                     loss = log_mse(prop[...,3*i:3*i+3],gt_prop[...,3*i:3*i+3])
                 total_loss+= loss
                 res[propn[i]] = loss.item()
+        if self.relight:
+            from dataset import gen_DiffuseRendering,gen_SpecularRendering,gen_img
+            from render import GGXRenderer
+            for i in range(prop.shape[0]):
+                (wi,wo),diff_gt,light_intensity = gen_DiffuseRendering(gt_prop[i].reshape(-1,12).contiguous(),GGXRenderer(multilight=False))
+                diff_pred = gen_img(wi,wo,prop.reshape(-1,12).contiguous(),GGXRenderer(multilight=False),light_intensity)
+                relit_diff = log_mse(diff_pred,diff_gt)
+                res['relit_diff'] = relit_diff.item()
+                (wi,wo),spec_gt,light_intensity = gen_SpecularRendering(gt_prop[i].reshape(-1,12).contiguous(),GGXRenderer(multilight=False))
+                spec_pred = gen_img(wi,wo,prop.reshape(-1,12).contiguous(),GGXRenderer(multilight=False),light_intensity)
+                relit_spec = log_mse(spec_pred,spec_gt)
+                res['relit_spec'] = relit_spec.item()
+                total_loss += relit_diff+relit_spec
         res['total']  = total_loss.item()       
         return total_loss,res
 mse2psnr = lambda x: -10.0 * torch.log(x) / np.log(10.0)

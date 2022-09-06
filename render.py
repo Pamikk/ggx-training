@@ -3,8 +3,6 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 dot_prod = lambda x,y: torch.sum(x*y, dim=-1,keepdim=True).clamp_min_(0.0)
-from utils import generate_normalized_random_direction
-light_intensity = 2.5
 class GGXRenderer(nn.Module):
     def __init__(self,multilight=True,albedo=0.0,roughness=0.7,fresnel=0.5) -> None:
         super(GGXRenderer,self).__init__()
@@ -23,7 +21,7 @@ class GGXRenderer(nn.Module):
         nom0 =(NoH*NoH*(alpha2-1)+ 1).clamp_min_(1e-3)# nom of D
         return alpha2/(nom0*nom0*np.pi) #(npt,nlights)
     def cal_G(self,NoL,NoV,roughness):
-        k = (roughness*roughness+2*roughness+1/8.0)
+        k = roughness*roughness/2.0
         return 1/((NoV * (1 - k) + k) *(NoL * (1 - k) + k)).clamp_min_(1e-6)
     def cal_diffuse(self,albedo,fresnel):
         if len(fresnel.shape)>0 and(len(fresnel.shape)<len(albedo.shape)):
@@ -103,8 +101,8 @@ class GGXRenderer_optim(GGXRenderer):
         img =(light_rgb* np.pi*img).view(*(self.albedo.shape)).contiguous().clamp_(1e-10,1.0)
         prop = torch.cat([F.normalize(self.normal,dim=-1),self.albedo,self.roughness.repeat(1,1,3),self.fresnel],dim=-1)
         return img,prop
-
 def get_rendering(wi,wo,data,Render,light_rgb,diffuse=True):
+    wi,wo,light_rgb = wi.to(data.device),wo.to(data.device),light_rgb.to(data.device)
     if data.shape[-1] ==12:
         normal,albedo,alpha,fresnel = data.split([3,3,3,3],dim=-1)
     if data.shape[-1] ==10:

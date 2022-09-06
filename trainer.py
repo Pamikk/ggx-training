@@ -179,9 +179,9 @@ class Trainer:
         start = time.time()
         for data in tqdm(self.trainset):
             times['data'] += (time.time()-start)/n
-            wi,wo,light_rgb,imgs,props_gt,imgt = data
+            wi,wo,light_rgb,imgs,props_gt = data
             preds,props = self.net(wi.to(self.device),wo.to(self.device),light_rgb.to(self.device),imgs.to(self.device),props_gt.to(self.device))
-            loss,losses = self.loss(preds,imgt.to(self.device),props,props_gt.to(self.device))            
+            loss,losses = self.loss(preds,imgs.to(self.device),props,props_gt.to(self.device))            
             for k in losses.keys():
                 if np.isnan(losses[k]):
                         continue
@@ -265,9 +265,9 @@ class Trainer:
         self.net.eval()
         for data in tqdm(valset):
             with torch.no_grad():
-                wi,wo,light_rgb,imgs,prop_gt,imgt = data
-                props = self.net(wi.to(self.device),wo.to(self.device),light_rgb.to(self.device),imgs.to(self.device),prop_gt.to(self.device))
-                result = self.eval_metric(preds,imgt.to(self.device),props,prop_gt.to(self.device))           
+                wi,wo,light_rgb,imgs,prop_gt = data
+                preds,props = self.net(wi.to(self.device),wo.to(self.device),light_rgb.to(self.device),imgs.to(self.device),prop_gt.to(self.device))
+                result = self.eval_metric(preds,imgs.to(self.device),props,prop_gt.to(self.device))           
                 for k in result:
                     if k in metrics.keys():
                         metrics[k].append(result[k])

@@ -11,10 +11,10 @@ from trainer import Trainer
 class Config:
     def __init__(self):
         self.mode = "train" #only test/train in this exp
-        exp_path = "/home/pami/exps/ggx_scratch"
+        exp_path = "/home/pami/exps/ggx_unet"
         if not os.path.exists(exp_path):
             os.mkdir(exp_path)
-        self.exp_name = "feat_sup_all_l1"
+        self.exp_name = "feat_render_relight_debug"
         self.log_exp_path = os.path.join(exp_path,self.exp_name)
         if not os.path.exists(self.log_exp_path):
             os.mkdir(self.log_exp_path)
@@ -31,10 +31,10 @@ class Config:
 
         self.val_every_k_epoch = max(self.epochs//20,1)
         self.save_every_k_epoch = max(self.epochs//5,1)
-        self.lr = 2e-5
-        self.weight_decay = 1e-5
+        self.lr = 5e-4
+        self.weight_decay = 0
         self.lr_factor = 0.2
-        self.schedules = []#np.array([200,400])//self.bs
+        self.schedules = [8000]#np.array([200,400])//self.bs
         self.patience = max(100//self.bs,10)
         print(self.patience)
         self.min_lr = 1e-7
